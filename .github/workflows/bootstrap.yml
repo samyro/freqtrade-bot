@@ -1,0 +1,146 @@
+name: Bootstrap freqtrade VPS
+
+# One-time / rotation workflow. Creates the freqtrade k8s namespace, copies
+# the ghcr-pull-secret from the algo-trader namespace, and creates/updates
+# the freqtrade-secrets Secret from GitHub Actions secrets.
+#
+# Re-running is safe and is the recommended way to rotate Kraken keys or
+# WebUI credentials. JWT secret + WS token are regenerated on every run
+# (this invalidates existing WebUI sessions — re-login after running).
+#
+# Required GitHub Actions secrets:
+#   KRAKEN_API_KEY       (secret) — from Kraken Settings → API → key
+#   KRAKEN_API_SECRET    (secret) — paired private key
+#   FT_WEBUI_PASSWORD    (secret) — long random string, save in 1Password
+#
+# Required GitHub Actions variables:
+#   FT_WEBUI_USERNAME    (variable) — your chosen login, e.g. "freqtrader"
+#   VPS_HOST             (variable) — already set: 72.62.79.28
+#   VPS_USER             (variable) — already set: root
+#
+# Required GitHub Actions secret (already configured for algo-trader):
+#   VPS_SSH_KEY          (secret)
+on:
+  workflow_dispatch:
+
+jobs:
+  bootstrap:
+    name: Sync k8s namespace + secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ vars.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Validate required GitHub config is present
+        env:
+          KRAKEN_API_KEY: ${{ secrets.KRAKEN_API_KEY }}
+          KRAKEN_API_SECRET: ${{ secrets.KRAKEN_API_SECRET }}
+          FT_WEBUI_USERNAME: ${{ vars.FT_WEBUI_USERNAME }}
+          FT_WEBUI_PASSWORD: ${{ secrets.FT_WEBUI_PASSWORD }}
+        run: |
+          missing=()
+          [ -z "$KRAKEN_API_KEY" ]    && missing+=("KRAKEN_API_KEY (secret)")
+          [ -z "$KRAKEN_API_SECRET" ] && missing+=("KRAKEN_API_SECRET (secret)")
+          [ -z "$FT_WEBUI_USERNAME" ] && missing+=("FT_WEBUI_USERNAME (variable)")
+          [ -z "$FT_WEBUI_PASSWORD" ] && missing+=("FT_WEBUI_PASSWORD (secret)")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing required GitHub config:"
+            for m in "${missing[@]}"; do echo "  - $m"; done
+            echo ""
+            echo "Add them at: ${{ github.server_url }}/${{ github.repository }}/settings/secrets/actions"
+            exit 1
+          fi
+          echo "All required values present."
+
+      - name: Build secrets JSON locally
+        env:
+          KRAKEN_API_KEY:     ${{ secrets.KRAKEN_API_KEY }}
+          KRAKEN_API_SECRET:  ${{ secrets.KRAKEN_API_SECRET }}
+          FT_WEBUI_USERNAME:  ${{ vars.FT_WEBUI_USERNAME }}
+          FT_WEBUI_PASSWORD:  ${{ secrets.FT_WEBUI_PASSWORD }}
+        run: |
+          # Fresh JWT + WS token on every bootstrap run — these are
+          # session-tokens; regenerating invalidates active WebUI sessions
+          # but doesn't affect login (password is the auth factor).
+          JWT=$(openssl rand -hex 32)
+          WS=$(openssl rand -hex 16)
+
+          # jq builds the JSON safely (no shell escape issues with special
+          # characters in keys or passwords).
+          jq -n \
+            --arg key    "$KRAKEN_API_KEY" \
+            --arg secret "$KRAKEN_API_SECRET" \
+            --arg user   "$FT_WEBUI_USERNAME" \
+            --arg pass   "$FT_WEBUI_PASSWORD" \
+            --arg jwt    "$JWT" \
+            --arg ws     "$WS" \
+            '{
+              exchange:   { key: $key, secret: $secret },
+              api_server: { username: $user, password: $pass, jwt_secret_key: $jwt, ws_token: $ws }
+            }' > /tmp/config.secrets.json
+
+          # Sanity-check it's valid JSON without leaking values to the log.
+          jq empty /tmp/config.secrets.json
+          echo "Built /tmp/config.secrets.json (size: $(stat -c %s /tmp/config.secrets.json) bytes)."
+
+      - name: Push to VPS as k8s Secret
+        env:
+          SSH: ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes ${{ vars.VPS_USER }}@${{ vars.VPS_HOST }}
+        run: |
+          # Copy the JSON to a temp file on the VPS, apply as Secret, then shred it.
+          scp -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes \
+            /tmp/config.secrets.json \
+            ${{ vars.VPS_USER }}@${{ vars.VPS_HOST }}:/tmp/ft-bootstrap.json
+
+          # Wipe local copy now that it's on the wire.
+          shred -u /tmp/config.secrets.json 2>/dev/null || rm -f /tmp/config.secrets.json
+
+          $SSH bash <<'REMOTE'
+            set -euo pipefail
+            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+            echo "==> Ensure namespace 'freqtrade' exists..."
+            kubectl get ns freqtrade >/dev/null 2>&1 \
+              || kubectl create namespace freqtrade
+
+            echo "==> Ensure 'ghcr-pull-secret' in freqtrade namespace..."
+            if ! kubectl -n freqtrade get secret ghcr-pull-secret >/dev/null 2>&1; then
+              if kubectl -n algo-trader get secret ghcr-pull-secret >/dev/null 2>&1; then
+                echo "    Copying from algo-trader namespace..."
+                kubectl -n algo-trader get secret ghcr-pull-secret -o yaml \
+                  | sed 's/namespace: algo-trader/namespace: freqtrade/' \
+                  | kubectl apply -f -
+              else
+                echo "::error::ghcr-pull-secret not found in algo-trader namespace either."
+                echo "    Create it manually with:"
+                echo "      kubectl -n freqtrade create secret docker-registry ghcr-pull-secret \\"
+                echo "        --docker-server=ghcr.io --docker-username=YOU --docker-password=YOUR_GHCR_PAT"
+                exit 1
+              fi
+            else
+              echo "    Already present."
+            fi
+
+            echo "==> Apply 'freqtrade-secrets' from bootstrap JSON..."
+            kubectl -n freqtrade create secret generic freqtrade-secrets \
+              --from-file=config.secrets.json=/tmp/ft-bootstrap.json \
+              --dry-run=client -o yaml | kubectl apply -f -
+
+            shred -u /tmp/ft-bootstrap.json 2>/dev/null || rm -f /tmp/ft-bootstrap.json
+
+            echo "==> If freqtrade deployment exists, restart to pick up secret..."
+            if kubectl -n freqtrade get deploy/freqtrade >/dev/null 2>&1; then
+              kubectl -n freqtrade rollout restart deployment/freqtrade
+              kubectl -n freqtrade rollout status deployment/freqtrade --timeout=120s
+            else
+              echo "    No deployment yet — run the 'CI / Deploy' workflow next."
+            fi
+
+            echo
+            echo "==> Bootstrap complete. Secrets in namespace:"
+            kubectl -n freqtrade get secrets
+          REMOTE
