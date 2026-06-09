@@ -1,0 +1,43 @@
+# Defaults — override per-environment via --set or values-prod.yaml.
+
+image:
+  repository: ghcr.io/samyro/freqtrade-bot
+  tag: latest
+  pullPolicy: IfNotPresent
+  pullSecret: ghcr-pull-secret
+
+namespace: freqtrade
+
+replicaCount: 1
+
+# Strategy class name. Must match a class in user_data/strategies/.
+# Override per deploy: helm upgrade --set strategy=BBRSI ...
+strategy: SampleStrategy
+
+service:
+  type: ClusterIP
+  port: 8090
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 200m
+    memory: 256Mi
+
+# PVC for trades DB + logs. Mandatory in live mode — losing sqlite means
+# losing trade history + open positions.
+persistence:
+  enabled: true
+  size: 5Gi
+  storageClassName: ""   # default storage class
+
+# k8s Secret with Kraken keys + API auth (JSON file mounted at
+# /freqtrade/user_data/config.secrets.json). Created by setup-freqtrade-vps.sh.
+secretName: freqtrade-secrets
+
+healthCheck:
+  enabled: true
+  initialDelaySeconds: 30
+  periodSeconds: 30

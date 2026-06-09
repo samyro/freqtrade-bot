@@ -1,0 +1,16 @@
+Freqtrade deployed.
+
+  Namespace: {{ .Values.namespace }}
+  Strategy:  {{ .Values.strategy }}
+  Image:     {{ .Values.image.repository }}:{{ .Values.image.tag }}
+
+To watch:
+
+  kubectl -n {{ .Values.namespace }} logs deploy/{{ include "freqtrade.fullname" . }} -f
+
+To access the WebUI from your laptop:
+
+  ssh -L 8090:localhost:8090 root@<your-vps>
+  open http://localhost:8090
+
+If dry_run is true, the WebUI shows "Simulation".

@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "freqtrade.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "freqtrade.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  # Recreate, not RollingUpdate — only one pod can hold the sqlite RWO lock.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "freqtrade.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "freqtrade.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Restart on Secret change so rotated keys take effect without
+        # bumping the image tag.
+        checksum/secret: {{ .Values.secretName | sha256sum }}
+    spec:
+      {{- if .Values.image.pullSecret }}
+      imagePullSecrets:
+        - name: {{ .Values.image.pullSecret }}
+      {{- end }}
+      containers:
+        - name: freqtrade
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "trade"
+            - "--config"
+            - "/freqtrade/user_data/config.json"
+            - "--config"
+            - "/freqtrade/user_data/config.secrets.json"
+            - "--strategy"
+            - {{ .Values.strategy | quote }}
+            - "--logfile"
+            - "/freqtrade/user_data/logs/freqtrade.log"
+            - "--db-url"
+            - "sqlite:////freqtrade/user_data/db/tradesv3.sqlite"
+          ports:
+            - name: webui
+              containerPort: 8090
+              protocol: TCP
+          {{- if .Values.healthCheck.enabled }}
+          livenessProbe:
+            httpGet:
+              path: /api/v1/ping
+              port: webui
+            initialDelaySeconds: {{ .Values.healthCheck.initialDelaySeconds }}
+            periodSeconds: {{ .Values.healthCheck.periodSeconds }}
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /api/v1/ping
+              port: webui
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /freqtrade/user_data/db
+              subPath: db
+            - name: data
+              mountPath: /freqtrade/user_data/logs
+              subPath: logs
+            - name: data
+              mountPath: /freqtrade/user_data/data
+              subPath: data
+            - name: secrets
+              mountPath: /freqtrade/user_data/config.secrets.json
+              subPath: config.secrets.json
+              readOnly: true
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "freqtrade.fullname" . }}-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: secrets
+          secret:
+            secretName: {{ .Values.secretName }}
+            items:
+              - key: config.secrets.json
+                path: config.secrets.json

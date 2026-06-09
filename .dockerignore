@@ -1,0 +1,22 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+.DS_Store
+.vscode
+.idea
+
+# Local scratch
+ft_userdata/
+
+# Don't bake secrets into the image
+user_data/config.secrets.json
+user_data/db/
+user_data/logs/
+user_data/data/
+user_data/backtest_results/
+
+# Docs are not needed inside the container
+docs/
+README.md
