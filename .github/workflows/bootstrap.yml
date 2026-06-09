@@ -29,11 +29,64 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Set up SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ vars.VPS_HOST }}
         run: |
+          set -euo pipefail
+
+          # ── Sanity checks ────────────────────────────────────────────
+          if [ -z "$VPS_SSH_KEY" ]; then
+            echo "::error::VPS_SSH_KEY secret is empty or missing."
+            echo "Add at: ${{ github.server_url }}/${{ github.repository }}/settings/secrets/actions"
+            exit 1
+          fi
+          if [ -z "$VPS_HOST" ]; then
+            echo "::error::VPS_HOST variable is empty or missing."
+            echo "Add at: ${{ github.server_url }}/${{ github.repository }}/settings/variables/actions"
+            exit 1
+          fi
+          echo "VPS_HOST = $VPS_HOST  (length: ${#VPS_HOST})"
+          echo "VPS_SSH_KEY length: ${#VPS_SSH_KEY} bytes"
+
+          # ── Write the key ────────────────────────────────────────────
           mkdir -p ~/.ssh
-          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H "${{ vars.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+          # Validate the key has the right shape (don't leak content).
+          first_line=$(head -1 ~/.ssh/id_ed25519)
+          last_line=$(tail -1 ~/.ssh/id_ed25519)
+          case "$first_line" in
+            "-----BEGIN OPENSSH PRIVATE KEY-----"|"-----BEGIN RSA PRIVATE KEY-----"|"-----BEGIN EC PRIVATE KEY-----")
+              echo "Key first line OK: $first_line" ;;
+            *)
+              echo "::error::Key file's first line is not a recognized PEM header."
+              echo "Got: $first_line"
+              echo "Expected: '-----BEGIN OPENSSH PRIVATE KEY-----' (or similar)"
+              echo "Did you paste a PUBLIC key instead of the PRIVATE key?"
+              exit 1 ;;
+          esac
+          case "$last_line" in
+            "-----END OPENSSH PRIVATE KEY-----"|"-----END RSA PRIVATE KEY-----"|"-----END EC PRIVATE KEY-----")
+              echo "Key last line OK." ;;
+            *)
+              echo "::warning::Key file's last line is unexpected: $last_line"
+              echo "May be missing a trailing newline. Continuing anyway." ;;
+          esac
+
+          # ── Try ssh-keyscan, but tolerate failure ────────────────────
+          # Some VPS providers rate-limit unauthenticated SSH probes from
+          # CI IPs. If it fails, fall back to accept-new which is fine for
+          # our threat model (one-shot deploy connection).
+          if ssh-keyscan -T 10 -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/tmp/keyscan.err; then
+            echo "ssh-keyscan: collected $(wc -l < ~/.ssh/known_hosts) host key(s)."
+          else
+            echo "::warning::ssh-keyscan failed (exit $?). stderr:"
+            cat /tmp/keyscan.err || true
+            echo "Falling back to StrictHostKeyChecking=accept-new for SSH commands."
+            echo "STRICT_HOST=accept-new" >> "$GITHUB_ENV"
+          fi
 
       - name: Validate required GitHub config is present
         env:
@@ -89,10 +142,10 @@ jobs:
 
       - name: Push to VPS as k8s Secret
         env:
-          SSH: ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes ${{ vars.VPS_USER }}@${{ vars.VPS_HOST }}
+          SSH: ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=${STRICT_HOST:-yes} ${{ vars.VPS_USER }}@${{ vars.VPS_HOST }}
         run: |
           # Copy the JSON to a temp file on the VPS, apply as Secret, then shred it.
-          scp -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes \
+          scp -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=${STRICT_HOST:-yes} \
             /tmp/config.secrets.json \
             ${{ vars.VPS_USER }}@${{ vars.VPS_HOST }}:/tmp/ft-bootstrap.json
 
