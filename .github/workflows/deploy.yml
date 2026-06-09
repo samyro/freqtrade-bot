@@ -21,7 +21,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}-bot   # e.g. ghcr.io/owner/quant-3rd-lib-bot
+  IMAGE_NAME: ${{ github.repository_owner }}/freqtrade-bot   # matches values.yaml; doesn't depend on the repo name
 
 jobs:
   test:
@@ -94,8 +94,18 @@ jobs:
           if_key_exists: replace
       - name: Trust VPS host key
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
-          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
+          # Best-effort: ssh-keyscan can be rate-limited or time out from CI
+          # runners. The subsequent ssh/scp commands use accept-new so they'll
+          # work either way.
+          if ssh-keyscan -T 10 -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/tmp/keyscan.err; then
+            echo "ssh-keyscan: collected $(wc -l < ~/.ssh/known_hosts) host key(s)."
+          else
+            echo "::warning::ssh-keyscan failed (exit $?). stderr:"
+            cat /tmp/keyscan.err || true
+            echo "Will rely on StrictHostKeyChecking=accept-new for SSH commands."
+          fi
       - name: Copy helm chart
         run: |
           SSH="ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=accept-new ${VPS_USER}@${VPS_HOST}"
