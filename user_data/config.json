@@ -1,14 +1,14 @@
 {
   "_comment": "Freqtrade main config. SECRETS live in user_data/config.secrets.json (mounted from k8s Secret, never committed). The entrypoint passes both --config flags so secrets override + extend this file.",
 
-  "max_open_trades": 1,
-  "stake_currency": "USDT",
-  "stake_amount": "unlimited",
+  "max_open_trades": 3,
+  "stake_currency": "USDC",
+  "stake_amount": 30,
   "tradable_balance_ratio": 0.99,
   "fiat_display_currency": "USD",
 
   "_comment_dry_run": "ALWAYS start with dry_run=true. Run 3+ days, validate trade frequency/PnL look sane, THEN flip to false. Going straight to live with a fresh community strategy is how money disappears.",
-  "dry_run": true,
+  "dry_run": false,
   "dry_run_wallet": 1000,
   "cancel_open_orders_on_exit": false,
 
@@ -45,7 +45,7 @@
     "_comment_keys": "API key + secret loaded from config.secrets.json. Do NOT put real values here.",
     "ccxt_config": {},
     "ccxt_async_config": {},
-    "pair_whitelist": ["ETH/USDT"],
+    "pair_whitelist": ["ETH/USDC", "BTC/USDC", "SOL/USDC"],
     "pair_blacklist": []
   },
 
