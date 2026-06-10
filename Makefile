@@ -95,3 +95,58 @@ download-data: ## Download 90d of ETH/USDT 5m bars from Kraken into user_data/da
 	    --pairs ETH/USDT \
 	    --timeframes 5m \
 	    --days 90
+
+##@ Strategy management
+
+# Default source: the freqtrade-strategies repo's `berlinguyinca/` folder.
+# Override with `SRC=https://...` for strategies in other folders.
+STRATEGY_SRC ?= https://raw.githubusercontent.com/freqtrade/freqtrade-strategies/main/user_data/strategies/berlinguyinca/$(NAME).py
+
+.PHONY: strategy
+strategy: ## Switch to a community strategy. Usage: make strategy NAME=BbandRsi
+	@if [ -z "$(NAME)" ]; then \
+		echo ""; \
+		echo "Error: NAME is required."; \
+		echo "  Usage:  make strategy NAME=BbandRsi"; \
+		echo "  Override URL:  make strategy NAME=Foo SRC=https://example.com/Foo.py"; \
+		echo ""; \
+		exit 1; \
+	fi
+	@echo "==> Downloading $(NAME) from $(STRATEGY_SRC)"
+	@curl -fsSL -o user_data/strategies/$(NAME).py "$(STRATEGY_SRC)" \
+	  || { echo ""; echo "Download failed. The strategy may be in a different subfolder."; \
+	       echo "Browse https://github.com/freqtrade/freqtrade-strategies and override:"; \
+	       echo "  make strategy NAME=$(NAME) SRC=<raw-github-url>"; \
+	       rm -f user_data/strategies/$(NAME).py; exit 1; }
+	@echo "==> Verifying class name '$(NAME)' exists in the file"
+	@if ! grep -qE "^class $(NAME)\b" user_data/strategies/$(NAME).py; then \
+		echo ""; \
+		echo "WARN: 'class $(NAME)' not found in the downloaded file. Classes present:"; \
+		grep -E "^class " user_data/strategies/$(NAME).py || true; \
+		echo ""; \
+		echo "Either rename the file to match the class, or update values.yaml manually."; \
+		exit 1; \
+	fi
+	@echo "==> Updating helm/freqtrade/values.yaml -> strategy: $(NAME)"
+	@sed -i.bak 's/^strategy: .*/strategy: $(NAME)/' helm/freqtrade/values.yaml && rm -f helm/freqtrade/values.yaml.bak
+	@grep '^strategy:' helm/freqtrade/values.yaml
+	@echo ""
+	@echo "==> Committing + pushing — CI will auto-deploy in ~3 min"
+	@git add user_data/strategies/$(NAME).py helm/freqtrade/values.yaml
+	@git commit -m "switch to $(NAME) strategy"
+	@git push -u origin HEAD
+	@echo ""
+	@echo "Watch the deploy: gh run watch  (or open the Actions tab)"
+	@echo "After ~3 min:    make logs   # confirm 'Strategy: $(NAME)'"
+
+.PHONY: strategy-list
+strategy-list: ## Show all strategy files currently in the repo
+	@echo "Strategies in user_data/strategies/:"
+	@for f in user_data/strategies/*.py; do \
+		[ -f "$$f" ] || continue; \
+		cls=$$(grep -E "^class " "$$f" | head -1 | sed 's/class \([A-Za-z0-9_]*\).*/\1/'); \
+		echo "  $$(basename $$f .py)    class=$$cls"; \
+	done
+	@echo ""
+	@echo "Currently deployed:"
+	@grep '^strategy:' helm/freqtrade/values.yaml
