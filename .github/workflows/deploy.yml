@@ -108,24 +108,61 @@ jobs:
           fi
       - name: Copy helm chart
         run: |
+          set -euo pipefail
           SSH="ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=accept-new ${VPS_USER}@${VPS_HOST}"
-          $SSH "mkdir -p /root/helm/freqtrade"
-          # tar+strip-components mirrors algo-trader's approach — robust across
-          # rsync availability differences.
-          tar -czf - helm/freqtrade | $SSH "tar -xzf - --strip-components=1 -C /root/helm/freqtrade/"
+          # Wipe stale chart dir so partial old files can't shadow the new one.
+          # Then extract WITHOUT --strip-components — the tar contains
+          # helm/freqtrade/ and we want /root/helm/freqtrade/ on the VPS,
+          # so we just chop the leading 'helm/' via -C /root/helm/.
+          $SSH "rm -rf /root/helm/freqtrade && mkdir -p /root/helm"
+          tar -czf - -C helm freqtrade | $SSH "tar -xzf - -C /root/helm/"
+          # Verify the chart landed where helm expects it.
+          $SSH "ls -la /root/helm/freqtrade/Chart.yaml /root/helm/freqtrade/values.yaml /root/helm/freqtrade/templates/ | head -10"
       - name: Helm upgrade
         run: |
+          set -euo pipefail
           SSH="ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=accept-new ${VPS_USER}@${VPS_HOST}"
           IMAGE_REPO="${REGISTRY}/${IMAGE_NAME}"
-          $SSH <<EOF
+          echo "Local view: IMAGE_REPO=$IMAGE_REPO  IMAGE_TAG=$IMAGE_TAG"
+
+          # Use bash -s with stdin so 'set -e' on the REMOTE shell aborts
+          # if any command (esp. helm) fails. Without this the step exits 0
+          # even when helm errors out silently.
+          $SSH bash -s -- "$IMAGE_REPO" "$IMAGE_TAG" <<'REMOTE'
+            set -euo pipefail
+            IMAGE_REPO="$1"
+            IMAGE_TAG="$2"
             export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-            echo "==> Running helm upgrade --install (image tag: ${IMAGE_TAG})..."
+
+            echo "==> Remote view: IMAGE_REPO=$IMAGE_REPO  IMAGE_TAG=$IMAGE_TAG"
+            if [ -z "$IMAGE_REPO" ] || [ -z "$IMAGE_TAG" ]; then
+              echo "::error::IMAGE_REPO or IMAGE_TAG is empty — refusing to deploy a bad chart."
+              exit 1
+            fi
+
+            echo "==> helm template --dry-run sanity check"
+            helm template freqtrade /root/helm/freqtrade \
+              --namespace freqtrade \
+              --set image.repository="$IMAGE_REPO" \
+              --set image.tag="$IMAGE_TAG" \
+              | grep -E "^kind:" | sort | uniq -c
+
+            echo
+            echo "==> Running helm upgrade --install (tag: $IMAGE_TAG)..."
             helm upgrade --install freqtrade /root/helm/freqtrade \
               --namespace freqtrade \
               --create-namespace \
-              --set image.repository=${IMAGE_REPO} \
-              --set image.tag=${IMAGE_TAG} \
-              --wait --timeout=120s
+              --set image.repository="$IMAGE_REPO" \
+              --set image.tag="$IMAGE_TAG" \
+              --wait --timeout=180s
+
+            echo
+            echo "==> helm release status:"
+            helm -n freqtrade list
+            echo
             echo "==> Pod status:"
-            kubectl -n freqtrade get pods
-          EOF
+            kubectl -n freqtrade get pods -o wide
+            echo
+            echo "==> Recent events:"
+            kubectl -n freqtrade get events --sort-by=.lastTimestamp | tail -10
+          REMOTE
