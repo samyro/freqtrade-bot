@@ -12,7 +12,7 @@ replicaCount: 1
 
 # Strategy class name. Must match a class in user_data/strategies/.
 # Override per deploy: helm upgrade --set strategy=BBRSI ...
-strategy: SampleStrategy
+strategy: BbandRsi
 
 service:
   type: ClusterIP
