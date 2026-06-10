@@ -150,3 +150,19 @@ strategy-list: ## Show all strategy files currently in the repo
 	@echo ""
 	@echo "Currently deployed:"
 	@grep '^strategy:' helm/freqtrade/values.yaml
+
+
+.PHONY: wipe-trades
+wipe-trades: ## Wipe the trades DB (clears WebUI history, restarts pod). Confirms first.
+	@echo "This will DELETE all trade history from /freqtrade/user_data/db/tradesv3.sqlite"
+	@echo "Open positions on Kraken are NOT affected — only the bot's local record."
+	@read -r -p "Continue? [y/N] " yn; \
+	  if [ "$$yn" != "y" ] && [ "$$yn" != "Y" ]; then echo "Cancelled."; exit 1; fi
+	ssh $(VPS_HOST) 'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml && \
+	  kubectl -n $(NAMESPACE) exec deploy/freqtrade -- \
+	    rm -f /freqtrade/user_data/db/tradesv3.sqlite \
+	          /freqtrade/user_data/db/tradesv3.sqlite-shm \
+	          /freqtrade/user_data/db/tradesv3.sqlite-wal && \
+	  kubectl -n $(NAMESPACE) rollout restart deployment/freqtrade && \
+	  kubectl -n $(NAMESPACE) rollout status deployment/freqtrade --timeout=180s'
+	@echo "==> Done. Fresh DB. Refresh the WebUI."
