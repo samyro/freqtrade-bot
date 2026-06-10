@@ -203,3 +203,39 @@ jobs:
             echo "==> Bootstrap complete. Secrets in namespace:"
             kubectl -n freqtrade get secrets
           REMOTE
+      - name: Install port-forward systemd unit
+        env:
+          VPS_USER: ${{ vars.VPS_USER }}
+          VPS_HOST: ${{ vars.VPS_HOST }}
+        run: |
+          set -euo pipefail
+          SSH_OPTS=(-i "$HOME/.ssh/id_ed25519" -o "StrictHostKeyChecking=${STRICT_HOST:-yes}")
+
+          # Idempotent: writes the unit file, reloads systemd, enables + starts.
+          # `kubectl port-forward` runs as root on the VPS, exposing the freqtrade
+          # WebUI on the VPS's localhost:8090. The user's `ssh -L 8090:localhost:8090`
+          # from their laptop terminates here.
+          ssh "${SSH_OPTS[@]}" "${VPS_USER}@${VPS_HOST}" bash <<'REMOTE'
+            set -euo pipefail
+            cat > /etc/systemd/system/freqtrade-port-forward.service <<'UNIT'
+          [Unit]
+          Description=kubectl port-forward freqtrade WebUI to localhost:8090
+          After=k3s.service
+          Wants=k3s.service
+
+          [Service]
+          Type=simple
+          Environment=KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+          ExecStart=/usr/local/bin/kubectl port-forward -n freqtrade svc/freqtrade 8090:8090 --address 127.0.0.1
+          Restart=always
+          RestartSec=10
+          User=root
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+            systemctl daemon-reload
+            systemctl enable --now freqtrade-port-forward.service
+            echo "==> Unit status:"
+            systemctl status freqtrade-port-forward.service --no-pager | head -8 || true
+          REMOTE
